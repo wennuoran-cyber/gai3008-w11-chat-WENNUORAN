@@ -11,6 +11,9 @@ const double kChatScale = 1.2;
 /// 이 시간 안에 응답이 없으면 timeout 오류로 본다.
 const Duration kResponseTimeout = Duration(seconds: 5);
 
+/// 타이핑 점 ↔ 오류 말풍선이 바뀌는 전환 시간.
+const Duration kStatusSwitchDuration = Duration(milliseconds: 250);
+
 class ChatLabApp extends StatelessWidget {
   const ChatLabApp({super.key, this.api});
 
@@ -178,8 +181,8 @@ class _ChatPageState extends State<ChatPage> {
       1,
       4,
     );
-    final hasStatus = _status is! ChatIdle;
-    final statusCount = (_isUserTyping ? 1 : 0) + (hasStatus ? 1 : 0);
+    // 상태 자리는 늘 목록에 두어(대기 중엔 높이 0) 사라질 때도 전환 효과가 보이게 한다.
+    final statusCount = (_isUserTyping ? 1 : 0) + 1;
 
     return Column(
       children: [
@@ -236,7 +239,7 @@ class _ChatPageState extends State<ChatPage> {
                       }
 
                       final statusIndex = _isUserTyping ? 1 : 0;
-                      if (hasStatus && index == statusIndex) {
+                      if (index == statusIndex) {
                         return _StatusBubble(status: _status, onRetry: _retry);
                       }
 
@@ -508,20 +511,44 @@ class _StatusBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return switch (status) {
-      ChatIdle() => const SizedBox.shrink(),
-      ChatSending() => const _TypingBubble(
-        isUser: false,
-        label: 'AI가 응답을 작성하고 있습니다',
+    // 실습 ④ 할 일 4 — AnimatedSwitcher로 전환.
+    // key가 바뀔 때마다 이전 말풍선은 줄어들며 사라지고 새 말풍선이 나타난다.
+    return AnimatedSwitcher(
+      duration: kStatusSwitchDuration,
+      switchInCurve: Curves.easeOut,
+      switchOutCurve: Curves.easeIn,
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: SizeTransition(
+          sizeFactor: animation,
+          alignment: Alignment.bottomLeft, // 목록 아래쪽(최신 쪽)에 붙어서 자란다.
+          child: child,
+        ),
       ),
-      ChatFailed(:final error) => _ErrorBubble(error: error, onRetry: onRetry),
-    };
+      layoutBuilder: (current, previous) => Stack(
+        alignment: Alignment.bottomLeft,
+        children: [...previous, ?current],
+      ),
+      child: switch (status) {
+        ChatIdle() => const SizedBox.shrink(key: ValueKey('idle')),
+        ChatSending() => const _TypingBubble(
+          key: ValueKey('sending'),
+          isUser: false,
+          label: 'AI가 응답을 작성하고 있습니다',
+        ),
+        ChatFailed(:final error) => _ErrorBubble(
+          key: ValueKey(error),
+          error: error,
+          onRetry: onRetry,
+        ),
+      },
+    );
   }
 }
 
 /// 실습 ④ 할 일 2 — 오류 말풍선 + 다시 시도. AI 쪽(왼쪽)에 오류 색으로 띄운다.
 class _ErrorBubble extends StatelessWidget {
-  const _ErrorBubble({required this.error, required this.onRetry});
+  const _ErrorBubble({super.key, required this.error, required this.onRetry});
 
   final ChatError error;
   final VoidCallback onRetry;
@@ -650,7 +677,7 @@ class _FakeModeMenuState extends State<_FakeModeMenu> {
 
 /// 메시지를 작성하거나 AI가 응답을 생성할 때 보이는 점 애니메이션 말풍선.
 class _TypingBubble extends StatelessWidget {
-  const _TypingBubble({required this.isUser, required this.label});
+  const _TypingBubble({super.key, required this.isUser, required this.label});
 
   final bool isUser;
   final String label;

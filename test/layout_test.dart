@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:lab1_chat_ui/chat_api.dart';
 import 'package:lab1_chat_ui/main.dart';
 
 /// 화면 크기·키보드·기기 글자 크기를 바꿔 가며 채팅 화면이 깨지지 않는지 본다.
@@ -67,6 +68,27 @@ void main() {
           _expectAboveKeyboard(tester, size, keyboard);
           await tester.pump(const Duration(seconds: 2));
         });
+
+        testWidgets('$label — 오류 말풍선 + 다시 시도', (tester) async {
+          final api = FakeChatApi(mode: FakeMode.timeout);
+          await _pump(tester, size, keyboard, textScale, api: api);
+
+          await tester.enterText(find.byType(TextField), '긴 질문 ' * 15);
+          await tester.pump();
+          await tester.tap(find.byIcon(Icons.send_rounded));
+          await tester.pump(kResponseTimeout);
+          await tester.pump(kStatusSwitchDuration);
+
+          expect(find.text('응답 시간 초과'), findsOneWidget);
+          expect(tester.takeException(), isNull, reason: label);
+          _expectAboveKeyboard(tester, size, keyboard);
+
+          // 오류 상태에서도 입력창에 여러 줄을 쓸 수 있다.
+          await tester.enterText(find.byType(TextField), '한 줄\n두 줄\n세 줄');
+          await tester.pump();
+          expect(tester.takeException(), isNull, reason: label);
+          _expectAboveKeyboard(tester, size, keyboard);
+        });
       }
     }
   }
@@ -76,8 +98,9 @@ Future<void> _pump(
   WidgetTester tester,
   Size size,
   double keyboard,
-  double textScale,
-) async {
+  double textScale, {
+  ChatApi? api,
+}) async {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = size;
   tester.view.viewInsets = FakeViewPadding(bottom: keyboard);
@@ -85,7 +108,7 @@ Future<void> _pump(
   addTearDown(tester.view.reset);
   addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
 
-  await tester.pumpWidget(const ChatLabApp());
+  await tester.pumpWidget(ChatLabApp(api: api));
   await tester.pump();
 }
 
