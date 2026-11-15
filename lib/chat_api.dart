@@ -135,9 +135,13 @@ class FakeChatApi implements ChatApi {
   /// 지금까지 받은 요청 수(테스트에서 재시도 횟수 확인용).
   int callCount = 0;
 
+  /// 마지막으로 받은 메시지(테스트에서 재시도 내용 확인용).
+  String? lastText;
+
   @override
   Future<String> send(String text) async {
     callCount++;
+    lastText = text;
 
     // 응답이 끝내 오지 않는 상황. 호출하는 쪽의 timeout이 끊어 준다.
     if (mode == FakeMode.timeout) return Completer<String>().future;

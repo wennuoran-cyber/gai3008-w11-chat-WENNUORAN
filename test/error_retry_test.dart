@@ -77,6 +77,45 @@ void main() {
     });
   });
 
+  group('할 일 2·3 — 다시 시도는 마지막 메시지를 다시', () {
+    testWidgets('다시 시도하면 같은 문장을 다시 보내고, 사용자 말풍선은 늘지 않는다', (tester) async {
+      final api = await pumpApp(tester, FakeMode.server);
+      await send(tester, '재시도할 질문');
+      await tester.pump(latency);
+      await tester.pump();
+      expect(find.text('서버 오류 (500)'), findsOneWidget);
+      expect(api.callCount, 1);
+
+      // 서버가 회복된 뒤 다시 시도
+      api.mode = FakeMode.success;
+      await tester.tap(find.text('다시 시도'));
+      await tester.pump();
+
+      expect(api.callCount, 2);
+      expect(api.lastText, '재시도할 질문');
+      expect(find.text('서버 오류 (500)'), findsNothing);
+      expect(find.text('재시도할 질문'), findsOneWidget);
+
+      await tester.pump(latency);
+      await tester.pump();
+      expect(find.text('아직 미구현되었습니다.'), findsOneWidget);
+      expect(find.text('재시도할 질문'), findsOneWidget);
+    });
+
+    testWidgets('다시 시도도 실패하면 오류가 다시 남는다', (tester) async {
+      final api = await pumpApp(tester, FakeMode.unauthorized);
+      await send(tester, '질문');
+      await tester.pump(latency);
+      await tester.pump();
+
+      await tester.tap(find.text('다시 시도'));
+      await tester.pump(latency);
+      await tester.pump();
+      expect(api.callCount, 2);
+      expect(find.text('인증 오류 (401)'), findsOneWidget);
+    });
+  });
+
   group('완료 기준', () {
     testWidgets('화면에 오류가 남는다', (tester) async {
       await pumpApp(tester, FakeMode.server);

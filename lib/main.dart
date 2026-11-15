@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import 'chat_api.dart';
@@ -70,6 +68,9 @@ class _ChatPageState extends State<ChatPage> {
   /// 요청마다 번호를 매겨, 화면을 떠났거나 더 새 요청이 있으면 늦게 온 결과를 버린다.
   int _requestId = 0;
 
+  /// 마지막으로 보낸 메시지. 다시 시도할 때 이 문장을 그대로 다시 보낸다.
+  String? _lastText;
+
   bool get _isBusy => _status is ChatSending;
 
   /// 대화 영역 위쪽 접이식 패널에 보여 줄 입력 예시.
@@ -108,11 +109,20 @@ class _ChatPageState extends State<ChatPage> {
     _request(text);
   }
 
+  /// 실습 ④ 할 일 3 — 재시도는 마지막 메시지를 다시 보낸다.
+  /// 사용자 말풍선은 이미 있으므로 새로 추가하지 않는다.
+  void _retry() {
+    final text = _lastText;
+    if (text == null || _isBusy) return;
+    _request(text);
+  }
+
   /// [text]를 보내고 결과에 따라 상태를 바꾼다.
   /// 401·429·500·timeout 등 어떤 실패든 ChatError 하나로 바꿔 ChatFailed에 담는다.
   Future<void> _request(String text) async {
     final id = ++_requestId;
     bool isStale() => !mounted || id != _requestId;
+    _lastText = text;
 
     setState(() => _status = const ChatSending());
     try {
@@ -227,7 +237,7 @@ class _ChatPageState extends State<ChatPage> {
 
                       final statusIndex = _isUserTyping ? 1 : 0;
                       if (hasStatus && index == statusIndex) {
-                        return _StatusBubble(status: _status);
+                        return _StatusBubble(status: _status, onRetry: _retry);
                       }
 
                       final message =
@@ -491,9 +501,10 @@ class _Bubble extends StatelessWidget {
 
 /// 요청 상태에 맞는 AI 쪽 말풍선. 전송 중이면 타이핑 점, 실패면 오류 말풍선.
 class _StatusBubble extends StatelessWidget {
-  const _StatusBubble({required this.status});
+  const _StatusBubble({required this.status, required this.onRetry});
 
   final ChatStatus status;
+  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -503,16 +514,17 @@ class _StatusBubble extends StatelessWidget {
         isUser: false,
         label: 'AI가 응답을 작성하고 있습니다',
       ),
-      ChatFailed(:final error) => _ErrorBubble(error: error),
+      ChatFailed(:final error) => _ErrorBubble(error: error, onRetry: onRetry),
     };
   }
 }
 
-/// 실습 ④ 할 일 2 — 오류 말풍선. AI 쪽(왼쪽)에 오류 색으로 띄운다.
+/// 실습 ④ 할 일 2 — 오류 말풍선 + 다시 시도. AI 쪽(왼쪽)에 오류 색으로 띄운다.
 class _ErrorBubble extends StatelessWidget {
-  const _ErrorBubble({required this.error});
+  const _ErrorBubble({required this.error, required this.onRetry});
 
   final ChatError error;
+  final VoidCallback onRetry;
 
   IconData get _icon => switch (error.kind) {
     ChatErrorKind.unauthorized => Icons.lock_outline,
@@ -567,6 +579,19 @@ class _ErrorBubble extends StatelessWidget {
                     Text(
                       error.description,
                       style: textTheme.bodyMedium?.copyWith(color: onColor),
+                    ),
+                    const SizedBox(height: 4 * kChatScale),
+                    TextButton.icon(
+                      onPressed: onRetry,
+                      style: TextButton.styleFrom(
+                        foregroundColor: onColor,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8 * kChatScale,
+                        ),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('다시 시도'),
                     ),
                   ],
                 ),
