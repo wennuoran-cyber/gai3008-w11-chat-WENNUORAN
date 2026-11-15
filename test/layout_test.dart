@@ -102,7 +102,7 @@ void _expectAboveKeyboard(WidgetTester tester, Size size, double keyboard) {
     lessThanOrEqualTo(keyboardTop),
   );
   expect(
-    tester.getRect(find.byType(IconButton)).bottom,
+    tester.getRect(find.byTooltip('메시지 전송')).bottom,
     lessThanOrEqualTo(keyboardTop),
   );
 }

@@ -2,14 +2,22 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'chat_api.dart';
+
 void main() => runApp(const ChatLabApp());
 
 /// 대화 영역 배율. 말풍선·입력 예시·타이핑 점의 글자와 여백에 곱한다.
 /// 하단 입력창과 전송 버튼에는 적용하지 않는다.
 const double kChatScale = 1.2;
 
+/// 이 시간 안에 응답이 없으면 timeout 오류로 본다.
+const Duration kResponseTimeout = Duration(seconds: 5);
+
 class ChatLabApp extends StatelessWidget {
-  const ChatLabApp({super.key});
+  const ChatLabApp({super.key, this.api});
+
+  /// 테스트에서 가짜 API를 주입할 때 쓴다. 없으면 기본 가짜 API를 쓴다.
+  final ChatApi? api;
 
   @override
   Widget build(BuildContext context) {
@@ -20,7 +28,7 @@ class ChatLabApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2F6FE4)),
         useMaterial3: true,
       ),
-      home: const ChatPage(),
+      home: ChatPage(api: api),
     );
   }
 }
@@ -34,7 +42,9 @@ class ChatMessage {
 }
 
 class ChatPage extends StatefulWidget {
-  const ChatPage({super.key});
+  const ChatPage({super.key, this.api});
+
+  final ChatApi? api;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -52,9 +62,15 @@ class _ChatPageState extends State<ChatPage> {
 
   final _controller = TextEditingController();
 
-  /// AI 응답을 기다리는 동안에만 대기 말풍선을 보여 준다.
-  bool _sending = false;
-  Timer? _responseTimer;
+  late final ChatApi _api = widget.api ?? FakeChatApi();
+
+  /// 요청 상태 — 대기 / 전송 중 / 실패 중 하나. 실습 ④ 할 일 1.
+  ChatStatus _status = const ChatIdle();
+
+  /// 요청마다 번호를 매겨, 화면을 떠났거나 더 새 요청이 있으면 늦게 온 결과를 버린다.
+  int _requestId = 0;
+
+  bool get _isBusy => _status is ChatSending;
 
   /// 대화 영역 위쪽 접이식 패널에 보여 줄 입력 예시.
   static const _suggestions = [
@@ -88,23 +104,33 @@ class _ChatPageState extends State<ChatPage> {
     setState(() {
       _messages.add(ChatMessage(text: text, isUser: true));
       _controller.clear();
-      _sending = true;
     });
+    _request(text);
+  }
 
-    // API 연결 전에는 응답을 흉내 내어 대기 애니메이션을 확인한다.
-    _responseTimer?.cancel();
-    _responseTimer = Timer(const Duration(milliseconds: 1200), () {
-      if (!mounted) return;
+  /// [text]를 보내고 결과에 따라 상태를 바꾼다.
+  /// 401·429·500·timeout 등 어떤 실패든 ChatError 하나로 바꿔 ChatFailed에 담는다.
+  Future<void> _request(String text) async {
+    final id = ++_requestId;
+    bool isStale() => !mounted || id != _requestId;
+
+    setState(() => _status = const ChatSending());
+    try {
+      final reply = await _api.send(text).timeout(kResponseTimeout);
+      if (isStale()) return;
       setState(() {
-        _messages.add(const ChatMessage(text: '아직 미구현되었습니다.', isUser: false));
-        _sending = false;
+        _messages.add(ChatMessage(text: reply, isUser: false));
+        _status = const ChatIdle();
       });
-    });
+    } catch (e) {
+      if (isStale()) return;
+      setState(() => _status = ChatFailed(ChatError.from(e)));
+    }
   }
 
   @override
   void dispose() {
-    _responseTimer?.cancel();
+    _requestId++; // 진행 중인 요청 결과를 버린다.
     _controller.dispose();
     super.dispose();
   }
@@ -118,7 +144,12 @@ class _ChatPageState extends State<ChatPage> {
       //    · Android는 AndroidManifest의 windowSoftInputMode="adjustResize"가 함께 필요하다.
       //    · body를 SafeArea로 감싸 홈 인디케이터와 노치를 피한다.
       resizeToAvoidBottomInset: true,
-      appBar: AppBar(title: const Text('AI Chat — 실습 1')),
+      appBar: AppBar(
+        title: const Text('AI Chat — 실습 1'),
+        actions: [
+          if (_api case final FakeChatApi fake) _FakeModeMenu(api: fake),
+        ],
+      ),
       body: SafeArea(
         child: LayoutBuilder(
           builder: (context, constraints) =>
@@ -137,7 +168,8 @@ class _ChatPageState extends State<ChatPage> {
       1,
       4,
     );
-    final statusCount = (_isUserTyping ? 1 : 0) + (_sending ? 1 : 0);
+    final hasStatus = _status is! ChatIdle;
+    final statusCount = (_isUserTyping ? 1 : 0) + (hasStatus ? 1 : 0);
 
     return Column(
       children: [
@@ -183,7 +215,7 @@ class _ChatPageState extends State<ChatPage> {
                   child: ListView.builder(
                     reverse: true,
                     padding: const EdgeInsets.symmetric(vertical: 8),
-                    // 입력/전송 중 표시도 가장 최근 항목처럼 목록 맨 아래에 놓는다.
+                    // 입력 중·전송 중·오류 표시도 가장 최근 항목처럼 목록 맨 아래에 놓는다.
                     itemCount: _messages.length + statusCount,
                     itemBuilder: (context, index) {
                       if (_isUserTyping && index == 0) {
@@ -193,12 +225,9 @@ class _ChatPageState extends State<ChatPage> {
                         );
                       }
 
-                      final aiTypingIndex = _isUserTyping ? 1 : 0;
-                      if (_sending && index == aiTypingIndex) {
-                        return const _TypingBubble(
-                          isUser: false,
-                          label: 'AI가 응답을 작성하고 있습니다',
-                        );
+                      final statusIndex = _isUserTyping ? 1 : 0;
+                      if (hasStatus && index == statusIndex) {
+                        return _StatusBubble(status: _status);
                       }
 
                       final message =
@@ -216,7 +245,8 @@ class _ChatPageState extends State<ChatPage> {
 
         _MessageComposer(
           controller: _controller,
-          canSend: _canSend && !_sending,
+          // 오류가 난 뒤에도 입력·전송은 막지 않는다. 응답을 기다릴 때만 막는다.
+          canSend: _canSend && !_isBusy,
           maxLines: maxLines,
           onChanged: (_) => setState(() {}),
           onSend: _send,
@@ -455,6 +485,140 @@ class _Bubble extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 요청 상태에 맞는 AI 쪽 말풍선. 전송 중이면 타이핑 점, 실패면 오류 말풍선.
+class _StatusBubble extends StatelessWidget {
+  const _StatusBubble({required this.status});
+
+  final ChatStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    return switch (status) {
+      ChatIdle() => const SizedBox.shrink(),
+      ChatSending() => const _TypingBubble(
+        isUser: false,
+        label: 'AI가 응답을 작성하고 있습니다',
+      ),
+      ChatFailed(:final error) => _ErrorBubble(error: error),
+    };
+  }
+}
+
+/// 실습 ④ 할 일 2 — 오류 말풍선. AI 쪽(왼쪽)에 오류 색으로 띄운다.
+class _ErrorBubble extends StatelessWidget {
+  const _ErrorBubble({required this.error});
+
+  final ChatError error;
+
+  IconData get _icon => switch (error.kind) {
+    ChatErrorKind.unauthorized => Icons.lock_outline,
+    ChatErrorKind.rateLimited => Icons.hourglass_empty,
+    ChatErrorKind.server => Icons.cloud_off_outlined,
+    ChatErrorKind.timeout => Icons.timer_off_outlined,
+    ChatErrorKind.unknown => Icons.error_outline,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final onColor = colorScheme.onErrorContainer;
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Semantics(
+        liveRegion: true,
+        child: Container(
+          margin: const EdgeInsets.symmetric(
+            horizontal: 12 * kChatScale,
+            vertical: 4 * kChatScale,
+          ),
+          padding: const EdgeInsets.fromLTRB(
+            12 * kChatScale,
+            10 * kChatScale,
+            12 * kChatScale,
+            10 * kChatScale,
+          ),
+          constraints: const BoxConstraints(maxWidth: 420 * kChatScale),
+          decoration: BoxDecoration(
+            color: colorScheme.errorContainer,
+            borderRadius: BorderRadius.circular(14 * kChatScale),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(_icon, color: onColor, size: 20 * kChatScale),
+              const SizedBox(width: 8 * kChatScale),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      error.title,
+                      style: textTheme.titleSmall?.copyWith(color: onColor),
+                    ),
+                    const SizedBox(height: 2 * kChatScale),
+                    Text(
+                      error.description,
+                      style: textTheme.bodyMedium?.copyWith(color: onColor),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 앱바의 오류 재현 메뉴. 가짜 API가 다음 요청에 돌려줄 상황을 고른다.
+class _FakeModeMenu extends StatefulWidget {
+  const _FakeModeMenu({required this.api});
+
+  final FakeChatApi api;
+
+  @override
+  State<_FakeModeMenu> createState() => _FakeModeMenuState();
+}
+
+class _FakeModeMenuState extends State<_FakeModeMenu> {
+  @override
+  Widget build(BuildContext context) {
+    final mode = widget.api.mode;
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // 정상 응답이 아닐 때는 지금 어떤 오류를 재현 중인지 앱바에 표시한다.
+        if (mode != FakeMode.success)
+          Text(
+            mode.label,
+            style: TextStyle(color: colorScheme.error, fontSize: 13),
+          ),
+        PopupMenuButton<FakeMode>(
+          tooltip: '오류 재현',
+          icon: const Icon(Icons.science_outlined),
+          initialValue: mode,
+          onSelected: (value) => setState(() => widget.api.mode = value),
+          itemBuilder: (context) => [
+            for (final value in FakeMode.values)
+              CheckedPopupMenuItem(
+                value: value,
+                checked: value == mode,
+                child: Text(value.label),
+              ),
+          ],
+        ),
+      ],
     );
   }
 }
