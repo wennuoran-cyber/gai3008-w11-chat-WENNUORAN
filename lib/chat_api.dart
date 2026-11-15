@@ -98,6 +98,17 @@ class ChatSending extends ChatStatus {
 }
 
 /// 요청이 실패해 오류를 보여 주는 중. 다음 전송이나 재시도 전까지 남는다.
+/// 429를 받아 잠시 기다렸다가 자동으로 다시 보내려는 중. 실습 ④ 할 일 5.
+class ChatBackoff extends ChatStatus {
+  const ChatBackoff({required this.delay, required this.attempt});
+
+  /// 다시 보내기 전까지 기다리는 시간.
+  final Duration delay;
+
+  /// 몇 번째 자동 재시도인지(1부터).
+  final int attempt;
+}
+
 class ChatFailed extends ChatStatus {
   const ChatFailed(this.error);
 
@@ -112,6 +123,7 @@ enum FakeMode {
   success('정상 응답'),
   unauthorized('401 인증 오류'),
   rateLimited('429 요청 과다'),
+  rateLimitedOnce('429 한 번 후 성공'),
   server('500 서버 오류'),
   timeout('timeout 응답 없음');
 
@@ -138,6 +150,9 @@ class FakeChatApi implements ChatApi {
   /// 마지막으로 받은 메시지(테스트에서 재시도 내용 확인용).
   String? lastText;
 
+  /// rateLimitedOnce 모드에서 직전 요청을 429로 막았는지.
+  bool _justRateLimited = false;
+
   @override
   Future<String> send(String text) async {
     callCount++;
@@ -151,6 +166,11 @@ class FakeChatApi implements ChatApi {
       FakeMode.success => '아직 미구현되었습니다.',
       FakeMode.unauthorized => throw const HttpStatusException(401),
       FakeMode.rateLimited => throw const HttpStatusException(429),
+      // 한 번 막고 바로 다음 요청은 통과시킨다(백오프 후 성공하는 상황).
+      FakeMode.rateLimitedOnce =>
+        (_justRateLimited = !_justRateLimited)
+            ? throw const HttpStatusException(429)
+            : '잠시 기다렸다가 다시 보내서 받은 응답입니다.',
       FakeMode.server => throw const HttpStatusException(500),
       FakeMode.timeout => throw StateError('위에서 처리됨'),
     };

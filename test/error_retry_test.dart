@@ -152,6 +152,76 @@ void main() {
     expect(find.text('서버 오류 (500)'), findsOneWidget);
   });
 
+  group('할 일 5 — 429면 지수 백오프 1s → 2s', () {
+    testWidgets('1초, 2초 뒤에 자동으로 다시 보내고, 그래도 막히면 오류', (tester) async {
+      final api = await pumpApp(tester, FakeMode.rateLimited);
+      await send(tester, '질문');
+
+      // 1번째 요청이 429 → 1초 대기
+      await tester.pump(latency);
+      await tester.pump(kStatusSwitchDuration);
+      expect(api.callCount, 1);
+      expect(find.text('요청이 많아 1초 뒤 다시 보내요 (1/2)'), findsOneWidget);
+
+      // 1초가 지나기 전에는 다시 보내지 않는다.
+      await tester.pump(
+        const Duration(seconds: 1) -
+            kStatusSwitchDuration -
+            const Duration(milliseconds: 1),
+      );
+      expect(api.callCount, 1);
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(api.callCount, 2);
+
+      // 2번째 요청도 429 → 2초 대기
+      await tester.pump(latency);
+      await tester.pump(kStatusSwitchDuration);
+      expect(find.text('요청이 많아 2초 뒤 다시 보내요 (2/2)'), findsOneWidget);
+      await tester.pump(
+        const Duration(seconds: 2) -
+            kStatusSwitchDuration -
+            const Duration(milliseconds: 1),
+      );
+      expect(api.callCount, 2);
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(api.callCount, 3);
+
+      // 3번째도 429 → 더 기다리지 않고 오류 말풍선
+      await tester.pump(latency);
+      await tester.pump(kStatusSwitchDuration);
+      expect(find.text('요청이 너무 많아요 (429)'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 10));
+      expect(api.callCount, 3);
+      expect(api.lastText, '질문');
+    });
+
+    testWidgets('한 번 막히고 다음에 통과하면 오류 없이 응답이 온다', (tester) async {
+      final api = await pumpApp(tester, FakeMode.rateLimitedOnce);
+      await send(tester, '질문');
+
+      await tester.pump(latency);
+      await tester.pump(kStatusSwitchDuration);
+      expect(find.text('요청이 많아 1초 뒤 다시 보내요 (1/2)'), findsOneWidget);
+
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump(latency);
+      await settleSwitch(tester);
+      expect(api.callCount, 2);
+      expect(find.text('잠시 기다렸다가 다시 보내서 받은 응답입니다.'), findsOneWidget);
+      expect(find.textContaining('요청이 너무 많아요'), findsNothing);
+      expect(find.textContaining('다시 보내요'), findsNothing);
+    });
+
+    testWidgets('429가 아닌 오류는 자동으로 다시 보내지 않는다', (tester) async {
+      final api = await pumpApp(tester, FakeMode.server);
+      await send(tester, '질문');
+      await tester.pump(latency);
+      await tester.pump(const Duration(seconds: 10));
+      expect(api.callCount, 1);
+      expect(find.text('서버 오류 (500)'), findsOneWidget);
+    });
+  });
+
   group('완료 기준', () {
     testWidgets('화면에 오류가 남는다', (tester) async {
       await pumpApp(tester, FakeMode.server);

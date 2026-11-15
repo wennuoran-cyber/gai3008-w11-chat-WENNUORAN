@@ -11,6 +11,13 @@ const double kChatScale = 1.2;
 /// 이 시간 안에 응답이 없으면 timeout 오류로 본다.
 const Duration kResponseTimeout = Duration(seconds: 5);
 
+/// 429를 받으면 이 간격으로 기다렸다가 자동으로 다시 보낸다(지수 백오프 1s → 2s).
+/// 다 써도 429면 오류 말풍선을 띄운다.
+const List<Duration> kRateLimitBackoff = [
+  Duration(seconds: 1),
+  Duration(seconds: 2),
+];
+
 /// 타이핑 점 ↔ 오류 말풍선이 바뀌는 전환 시간.
 const Duration kStatusSwitchDuration = Duration(milliseconds: 250);
 
@@ -74,7 +81,7 @@ class _ChatPageState extends State<ChatPage> {
   /// 마지막으로 보낸 메시지. 다시 시도할 때 이 문장을 그대로 다시 보낸다.
   String? _lastText;
 
-  bool get _isBusy => _status is ChatSending;
+  bool get _isBusy => _status is ChatSending || _status is ChatBackoff;
 
   /// 대화 영역 위쪽 접이식 패널에 보여 줄 입력 예시.
   static const _suggestions = [
@@ -127,17 +134,35 @@ class _ChatPageState extends State<ChatPage> {
     bool isStale() => !mounted || id != _requestId;
     _lastText = text;
 
-    setState(() => _status = const ChatSending());
-    try {
-      final reply = await _api.send(text).timeout(kResponseTimeout);
-      if (isStale()) return;
-      setState(() {
-        _messages.add(ChatMessage(text: reply, isUser: false));
-        _status = const ChatIdle();
-      });
-    } catch (e) {
-      if (isStale()) return;
-      setState(() => _status = ChatFailed(ChatError.from(e)));
+    for (var attempt = 0; ; attempt++) {
+      setState(() => _status = const ChatSending());
+      try {
+        final reply = await _api.send(text).timeout(kResponseTimeout);
+        if (isStale()) return;
+        setState(() {
+          _messages.add(ChatMessage(text: reply, isUser: false));
+          _status = const ChatIdle();
+        });
+        return;
+      } catch (e) {
+        if (isStale()) return;
+        final error = ChatError.from(e);
+
+        // 실습 ④ 할 일 5 — 429면 1초, 2초 기다렸다가 자동으로 다시 보낸다.
+        if (error.kind == ChatErrorKind.rateLimited &&
+            attempt < kRateLimitBackoff.length) {
+          final delay = kRateLimitBackoff[attempt];
+          setState(
+            () => _status = ChatBackoff(delay: delay, attempt: attempt + 1),
+          );
+          await Future<void>.delayed(delay);
+          if (isStale()) return;
+          continue;
+        }
+
+        setState(() => _status = ChatFailed(error));
+        return;
+      }
     }
   }
 
@@ -536,6 +561,11 @@ class _StatusBubble extends StatelessWidget {
           isUser: false,
           label: 'AI가 응답을 작성하고 있습니다',
         ),
+        ChatBackoff(:final delay, :final attempt) => _BackoffBubble(
+          key: ValueKey('backoff-$attempt'),
+          delay: delay,
+          attempt: attempt,
+        ),
         ChatFailed(:final error) => _ErrorBubble(
           key: ValueKey(error),
           error: error,
@@ -621,6 +651,56 @@ class _ErrorBubble extends StatelessWidget {
                       label: const Text('다시 시도'),
                     ),
                   ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 429 백오프 중에 보이는 안내 말풍선. 몇 초 뒤 몇 번째로 다시 보내는지 알려 준다.
+class _BackoffBubble extends StatelessWidget {
+  const _BackoffBubble({super.key, required this.delay, required this.attempt});
+
+  final Duration delay;
+  final int attempt;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final onColor = colorScheme.onTertiaryContainer;
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Semantics(
+        liveRegion: true,
+        child: Container(
+          margin: const EdgeInsets.symmetric(
+            horizontal: 12 * kChatScale,
+            vertical: 4 * kChatScale,
+          ),
+          padding: const EdgeInsets.symmetric(
+            horizontal: 12 * kChatScale,
+            vertical: 10 * kChatScale,
+          ),
+          constraints: const BoxConstraints(maxWidth: 420 * kChatScale),
+          decoration: BoxDecoration(
+            color: colorScheme.tertiaryContainer,
+            borderRadius: BorderRadius.circular(14 * kChatScale),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.hourglass_top, color: onColor, size: 20 * kChatScale),
+              const SizedBox(width: 8 * kChatScale),
+              Flexible(
+                child: Text(
+                  '요청이 많아 ${delay.inSeconds}초 뒤 다시 보내요 '
+                  '($attempt/${kRateLimitBackoff.length})',
+                  style: TextStyle(color: onColor),
                 ),
               ),
             ],
