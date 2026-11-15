@@ -8,7 +8,7 @@ void main() {
     await tester.pumpWidget(const ChatLabApp());
 
     // 제목
-    expect(find.text('AI Chat — 실습 1'), findsOneWidget);
+    expect(find.text('AI Chat — 실습 1 & 4'), findsOneWidget);
 
     // 할 일 1이 끝났다면 목록이 그려진다
     expect(find.byType(ListView), findsOneWidget);

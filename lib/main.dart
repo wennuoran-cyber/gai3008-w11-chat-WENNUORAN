@@ -30,7 +30,7 @@ class ChatLabApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'AI Chat — 실습 1',
+      title: 'AI Chat — 실습 1 & 4',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2F6FE4)),
@@ -183,7 +183,7 @@ class _ChatPageState extends State<ChatPage> {
       //    · body를 SafeArea로 감싸 홈 인디케이터와 노치를 피한다.
       resizeToAvoidBottomInset: true,
       appBar: AppBar(
-        title: const Text('AI Chat — 실습 1'),
+        title: const Text('AI Chat — 실습 1 & 4'),
         actions: [
           if (_api case final FakeChatApi fake) _FakeModeMenu(api: fake),
         ],
