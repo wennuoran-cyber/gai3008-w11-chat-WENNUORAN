@@ -10,7 +10,11 @@ flutter pub get
 flutter run -d chrome      # 또는 -d <에뮬레이터>
 ```
 
-서버가 필요 없다. `_messages`에 들어 있는 가짜 대화로 화면만 만든다.
+서버가 필요 없다. `_messages`에 들어 있는 가짜 대화와 가짜 API(`FakeChatApi`)로 화면만 만든다.
+
+## 화면
+
+<!-- 스크린샷·GIF 자리. 넣을 내용은 docs/SCREENSHOT_GUIDE.md 참고 -->
 
 ## 할 일
 
@@ -60,11 +64,36 @@ flutter run -d chrome      # 또는 -d <에뮬레이터>
 
 | # | 내용 | 상태 |
 |---|---|---|
-| 1 | 401·429·500·timeout을 한 상태로 | ⬜ |
-| 2 | 오류 말풍선 + 다시 시도 | ⬜ |
-| 3 | 재시도는 마지막 메시지를 다시 | ⬜ |
-| 4 | `AnimatedSwitcher`로 전환 | ⬜ |
-| 5 | 429면 지수 백오프 1s → 2s | ⬜ |
+| 1 | 401·429·500·timeout을 한 상태로 | ✅ 완료 |
+| 2 | 오류 말풍선 + 다시 시도 | ✅ 완료 |
+| 3 | 재시도는 마지막 메시지를 다시 | ✅ 완료 |
+| 4 | `AnimatedSwitcher`로 전환 | ✅ 완료 |
+| 5 | 429면 지수 백오프 1s → 2s | ✅ 완료 |
+
+### 구현 내용
+
+| # | 구현 |
+|---|---|
+| 1 | 어떤 예외든 `ChatError.from()`으로 오류 하나(`unauthorized`·`rateLimited`·`server`·`timeout`·`unknown`)로 바꾼다. 화면 상태는 `ChatIdle` / `ChatSending` / `ChatBackoff` / `ChatFailed` 중 하나(`sealed class ChatStatus`)라 "대기 중이면서 오류" 같은 모순이 생기지 않는다. 5초 안에 응답이 없으면 timeout |
+| 2 | AI 쪽(왼쪽)에 `errorContainer` 색 오류 말풍선 — 종류별 아이콘·제목·설명과 **다시 시도** 버튼. 다음 전송이나 재시도 전까지 화면에 남는다 |
+| 3 | 마지막으로 보낸 문장을 기억해 두었다가 그대로 다시 보낸다. 사용자 말풍선은 새로 추가하지 않는다 |
+| 4 | 목록 맨 아래 상태 자리를 `AnimatedSwitcher`(페이드 + 크기, 250ms)로 감싸 타이핑 점 ↔ 대기 안내 ↔ 오류 말풍선이 부드럽게 바뀐다 |
+| 5 | 429면 오류를 바로 띄우지 않고 1초, 2초 기다렸다가 자동으로 다시 보낸다. 기다리는 동안 "N초 뒤 다시 보내요 (k/2)"를 보여 주고, 다 써도 429면 오류 말풍선 |
+
+### 오류 재현하기
+
+API가 아직 없어서 가짜 API가 오류를 흉내 낸다. 앱바 오른쪽 🧪 **오류 재현** 메뉴에서 다음 요청의 결과를 고른다.
+
+| 메뉴 | 결과 |
+|---|---|
+| 정상 응답 | 1.2초 뒤 "아직 미구현되었습니다." |
+| 401 인증 오류 | 1.2초 뒤 인증 오류 말풍선 |
+| 429 요청 과다 | 1초 → 2초 자동 재시도 뒤 429 오류 말풍선 |
+| 429 한 번 후 성공 | 한 번 막힌 뒤 1초 기다렸다가 응답 |
+| 500 서버 오류 | 1.2초 뒤 서버 오류 말풍선 |
+| timeout 응답 없음 | 5초 뒤 응답 시간 초과 말풍선 |
+
+정상이 아닌 모드를 고르면 앱바에 지금 재현 중인 오류 이름이 보인다. **다시 시도** 전에 메뉴를 "정상 응답"으로 바꾸면 재시도가 성공하는 모습을 볼 수 있다.
 
 ### 완료 기준
 
@@ -75,16 +104,19 @@ flutter run -d chrome      # 또는 -d <에뮬레이터>
 ## 구조
 
 ```
-lib/main.dart          ← 실습 파일 (TODO 2~5)
-test/widget_test.dart  ← 앱 실행·전송·키보드·입력 예시 동작 테스트
-test/layout_test.dart  ← 화면 크기·키보드·글자 크기 조합 32가지에서 레이아웃이 넘치지 않는지 확인
+lib/main.dart               ← 화면 (실습 1 TODO 2~5, 실습 ④ 오류 말풍선·재시도·백오프)
+lib/chat_api.dart           ← ChatApi · ChatError · ChatStatus · 가짜 API(FakeChatApi)
+test/widget_test.dart       ← 앱 실행·전송·키보드·입력 예시 동작 테스트
+test/error_retry_test.dart  ← 실습 ④ 할 일 1~5와 완료 기준 테스트
+test/layout_test.dart       ← 화면 크기·키보드·글자 크기 조합에서 레이아웃이 넘치지 않는지 확인
+docs/SCREENSHOT_GUIDE.md    ← README에 넣을 스크린샷·GIF 촬영 지침
 ```
 
 ## 테스트
 
 ```bash
 flutter analyze
-flutter test           # 36개
+flutter test           # 65개
 ```
 
 ## 제출
