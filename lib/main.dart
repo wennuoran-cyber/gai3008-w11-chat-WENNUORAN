@@ -1,20 +1,42 @@
 import 'package:flutter/material.dart';
 
+import 'chat_api.dart';
+
 void main() => runApp(const ChatLabApp());
 
+/// 대화 영역 배율. 말풍선·입력 예시·타이핑 점의 글자와 여백에 곱한다.
+/// 하단 입력창과 전송 버튼에는 적용하지 않는다.
+const double kChatScale = 1.2;
+
+/// 이 시간 안에 응답이 없으면 timeout 오류로 본다.
+const Duration kResponseTimeout = Duration(seconds: 5);
+
+/// 429를 받으면 이 간격으로 기다렸다가 자동으로 다시 보낸다(지수 백오프 1s → 2s).
+/// 다 써도 429면 오류 말풍선을 띄운다.
+const List<Duration> kRateLimitBackoff = [
+  Duration(seconds: 1),
+  Duration(seconds: 2),
+];
+
+/// 타이핑 점 ↔ 오류 말풍선이 바뀌는 전환 시간.
+const Duration kStatusSwitchDuration = Duration(milliseconds: 250);
+
 class ChatLabApp extends StatelessWidget {
-  const ChatLabApp({super.key});
+  const ChatLabApp({super.key, this.api});
+
+  /// 테스트에서 가짜 API를 주입할 때 쓴다. 없으면 기본 가짜 API를 쓴다.
+  final ChatApi? api;
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'AI Chat — 실습 1',
+      title: 'AI Chat — 실습 1 & 4',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2F6FE4)),
         useMaterial3: true,
       ),
-      home: const ChatPage(),
+      home: ChatPage(api: api),
     );
   }
 }
@@ -28,7 +50,9 @@ class ChatMessage {
 }
 
 class ChatPage extends StatefulWidget {
-  const ChatPage({super.key});
+  const ChatPage({super.key, this.api});
+
+  final ChatApi? api;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -36,63 +60,406 @@ class ChatPage extends StatefulWidget {
 
 class _ChatPageState extends State<ChatPage> {
   /// 실습용 가짜 대화 — API를 붙이기 전까지 이 목록으로 화면을 만든다.
-  final List<ChatMessage> _messages = const [
+  /// 이미 대화를 조금 나눈 것처럼 보이도록 몇 줄을 미리 넣어 둔다.
+  final List<ChatMessage> _messages = [
     ChatMessage(text: '오늘 뭐 배워?', isUser: true),
-    ChatMessage(text: 'AI 챗봇에 움직이는 응답을 붙입니다.', isUser: false),
+    ChatMessage(text: 'AI 챗봇 화면을 만들어요. 말풍선, 입력창, 타이핑 표시까지요.', isUser: false),
     ChatMessage(text: '타이핑 점은 왜 필요해요?', isUser: true),
     ChatMessage(text: '응답이 1초를 넘으면 앱이 멈춘 것처럼 보이기 때문입니다.', isUser: false),
   ];
+
+  final _controller = TextEditingController();
+
+  late final ChatApi _api = widget.api ?? FakeChatApi();
+
+  /// 요청 상태 — 대기 / 전송 중 / 실패 중 하나. 실습 ④ 할 일 1.
+  ChatStatus _status = const ChatIdle();
+
+  /// 요청마다 번호를 매겨, 화면을 떠났거나 더 새 요청이 있으면 늦게 온 결과를 버린다.
+  int _requestId = 0;
+
+  /// 마지막으로 보낸 메시지. 다시 시도할 때 이 문장을 그대로 다시 보낸다.
+  String? _lastText;
+
+  bool get _isBusy => _status is ChatSending || _status is ChatBackoff;
+
+  /// 대화 영역 위쪽 접이식 패널에 보여 줄 입력 예시.
+  static const _suggestions = [
+    '오늘 뭐 배워?',
+    'Flutter 위젯이 뭐야?',
+    '타이핑 점은 왜 필요해요?',
+    '오늘 할 일 정리해 줘',
+  ];
+
+  /// 입력 예시 패널을 펼쳤는지. 배경을 깔끔하게 두려고 처음엔 접어 둔다.
+  bool _suggestionsOpen = false;
+
+  bool get _canSend => _controller.text.trim().isNotEmpty;
+  bool get _isUserTyping => _canSend;
+
+  /// 예시를 누르면 입력창에 채우고 패널을 접는다. 전송은 사용자가 직접 한다.
+  void _fillSuggestion(String text) {
+    setState(() {
+      _suggestionsOpen = false;
+      _controller.value = TextEditingValue(
+        text: text,
+        selection: TextSelection.collapsed(offset: text.length),
+      );
+    });
+  }
+
+  void _send() {
+    final text = _controller.text.trim();
+    if (text.isEmpty) return;
+
+    setState(() {
+      _messages.add(ChatMessage(text: text, isUser: true));
+      _controller.clear();
+    });
+    _request(text);
+  }
+
+  /// 실습 ④ 할 일 3 — 재시도는 마지막 메시지를 다시 보낸다.
+  /// 사용자 말풍선은 이미 있으므로 새로 추가하지 않는다.
+  void _retry() {
+    final text = _lastText;
+    if (text == null || _isBusy) return;
+    _request(text);
+  }
+
+  /// [text]를 보내고 결과에 따라 상태를 바꾼다.
+  /// 401·429·500·timeout 등 어떤 실패든 ChatError 하나로 바꿔 ChatFailed에 담는다.
+  Future<void> _request(String text) async {
+    final id = ++_requestId;
+    bool isStale() => !mounted || id != _requestId;
+    _lastText = text;
+
+    for (var attempt = 0; ; attempt++) {
+      setState(() => _status = const ChatSending());
+      try {
+        final reply = await _api.send(text).timeout(kResponseTimeout);
+        if (isStale()) return;
+        setState(() {
+          _messages.add(ChatMessage(text: reply, isUser: false));
+          _status = const ChatIdle();
+        });
+        return;
+      } catch (e) {
+        if (isStale()) return;
+        final error = ChatError.from(e);
+
+        // 실습 ④ 할 일 5 — 429면 1초, 2초 기다렸다가 자동으로 다시 보낸다.
+        if (error.kind == ChatErrorKind.rateLimited &&
+            attempt < kRateLimitBackoff.length) {
+          final delay = kRateLimitBackoff[attempt];
+          setState(
+            () => _status = ChatBackoff(delay: delay, attempt: attempt + 1),
+          );
+          await Future<void>.delayed(delay);
+          if (isStale()) return;
+          continue;
+        }
+
+        setState(() => _status = ChatFailed(error));
+        return;
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _requestId++; // 진행 중인 요청 결과를 버린다.
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       // TODO 5 — 키보드가 입력창을 가리지 않게
-      // TIP: Scaffold의 resizeToAvoidBottomInset은 기본값이 true다.
-      //      body를 SafeArea로 감싸 홈 인디케이터와 노치를 피한다.
-      appBar: AppBar(title: const Text('AI Chat — 실습 1')),
+      //    · 키보드가 올라오면 body 높이를 줄여 입력창을 키보드 위로 올린다.
+      //      (기본값도 true지만 의도를 드러내려고 명시한다.)
+      //    · Android는 AndroidManifest의 windowSoftInputMode="adjustResize"가 함께 필요하다.
+      //    · body를 SafeArea로 감싸 홈 인디케이터와 노치를 피한다.
+      resizeToAvoidBottomInset: true,
+      appBar: AppBar(
+        title: const Text('AI Chat — 실습 1 & 4'),
+        actions: [
+          if (_api case final FakeChatApi fake) _FakeModeMenu(api: fake),
+        ],
+      ),
       body: SafeArea(
-        child: Column(
-          children: [
-            // ─────────────────────────────────────────────────────────
-            // ✅ 할 일 1 — 완료된 부분
-            //    ListView.builder + reverse: true
-            //    · reverse:true면 index 0이 화면 맨 아래(최신)다.
-            //    · 그래서 _messages[length - 1 - i]로 거꾸로 꺼낸다.
-            // ─────────────────────────────────────────────────────────
-            Expanded(
-              child: ListView.builder(
-                reverse: true,
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                itemCount: _messages.length,
-                itemBuilder: (context, index) {
-                  final message =
-                      _messages[_messages.length - 1 - index];
-                  return _Bubble(message: message);
-                },
+        child: LayoutBuilder(
+          builder: (context, constraints) =>
+              _buildChat(context, constraints.maxHeight),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildChat(BuildContext context, double availableHeight) {
+    // 화면이 낮을 때(가로 모드 + 키보드 등) 여러 줄 입력이 화면을 넘치지 않도록
+    // 입력창이 화면 높이의 절반을 넘지 않는 만큼만 줄 수를 허용한다(최대 4줄).
+    // 보통 세로 화면에서는 항상 4줄이다.
+    final lineHeight = MediaQuery.textScalerOf(context).scale(16) * 1.5;
+    final maxLines = ((availableHeight / 2 - 50) / lineHeight).floor().clamp(
+      1,
+      4,
+    );
+    // 상태 자리는 늘 목록에 두어(대기 중엔 높이 0) 사라질 때도 전환 효과가 보이게 한다.
+    final statusCount = (_isUserTyping ? 1 : 0) + 1;
+
+    return Column(
+      children: [
+        // ─────────────────────────────────────────────────────────
+        // ✅ 할 일 1 — 완료된 부분
+        //    ListView.builder + reverse: true
+        //    · reverse:true면 index 0이 화면 맨 아래(최신)다.
+        //    · 그래서 _messages[length - 1 - i]로 거꾸로 꺼낸다.
+        // ─────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────
+        // TODO 4 — 빈 상태
+        //    배경 문구 대신 입력창 힌트로 "무엇이든 물어보세요"를 보여 주고,
+        //    대화 영역 위에 펼치고 접을 수 있는 입력 예시를 둔다.
+        // ─────────────────────────────────────────────────────────
+        Expanded(
+          // 대화 영역(말풍선·입력 예시) 글자만 kChatScale배. 입력창은 원래 크기를 쓴다.
+          // 기기 글자 크기 설정도 반영하되, 둘이 곱해져 너무 커지지 않도록
+          // 기기 설정은 1.3배까지만 따른다.
+          child: MediaQuery(
+            data: MediaQuery.of(context).copyWith(
+              textScaler: TextScaler.linear(
+                MediaQuery.textScalerOf(
+                      context,
+                    ).clamp(maxScaleFactor: 1.3).scale(1) *
+                    kChatScale,
               ),
             ),
+            child: Column(
+              children: [
+                // 입력 예시 패널은 화면 높이의 절반까지만 차지하고,
+                // 그보다 길면 패널 안에서 스크롤된다(낮은 화면에서도 넘치지 않게).
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: availableHeight * 0.5),
+                  child: _SuggestionPanel(
+                    suggestions: _suggestions,
+                    isOpen: _suggestionsOpen,
+                    onToggle: () =>
+                        setState(() => _suggestionsOpen = !_suggestionsOpen),
+                    onSelected: _fillSuggestion,
+                  ),
+                ),
+                Expanded(
+                  child: ListView.builder(
+                    reverse: true,
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    // 입력 중·전송 중·오류 표시도 가장 최근 항목처럼 목록 맨 아래에 놓는다.
+                    itemCount: _messages.length + statusCount,
+                    itemBuilder: (context, index) {
+                      if (_isUserTyping && index == 0) {
+                        return const _TypingBubble(
+                          isUser: true,
+                          label: '메시지를 입력하고 있습니다',
+                        );
+                      }
 
-            // ─────────────────────────────────────────────────────────
-            // TODO 4 — 빈 상태
-            // TIP: ListView를 Stack으로 감싸고, 목록이 비었을 때만
-            //      Center(child: Text('무엇이든 물어보세요'))를 위에 띄운다.
-            //      지금은 목록에 가짜 대화가 있어 빈 상태가 보이지 않는다.
-            //      _messages를 비우고 확인해 보자.
-            // ─────────────────────────────────────────────────────────
+                      final statusIndex = _isUserTyping ? 1 : 0;
+                      if (index == statusIndex) {
+                        return _StatusBubble(status: _status, onRetry: _retry);
+                      }
 
-            // ─────────────────────────────────────────────────────────
-            // TODO 3 — 입력창 (TextField + 전송 버튼)
-            // TIP:
-            //  · final _controller = TextEditingController(); 를 State에 둔다.
-            //  · Row(children: [Expanded(TextField(...)), IconButton.filled(...)])
-            //  · TextField(textInputAction: TextInputAction.send,
-            //             onSubmitted: (_) => _send())
-            //  · 보낼 때 _controller.clear() 하고 setState로 목록에 추가한다.
-            //  · dispose()에서 _controller.dispose()를 잊지 않는다.
-            // ─────────────────────────────────────────────────────────
-            const _TodoBar(label: 'TODO 3 — 여기에 입력창을 만든다'),
-          ],
+                      final message =
+                          _messages[_messages.length -
+                              1 -
+                              (index - statusCount)];
+                      return _Bubble(message: message);
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
+
+        _MessageComposer(
+          controller: _controller,
+          // 오류가 난 뒤에도 입력·전송은 막지 않는다. 응답을 기다릴 때만 막는다.
+          canSend: _canSend && !_isBusy,
+          maxLines: maxLines,
+          onChanged: (_) => setState(() {}),
+          onSend: _send,
+        ),
+      ],
+    );
+  }
+}
+
+/// 대화 영역 위쪽의 접이식 입력 예시 패널.
+/// 머리줄을 누르면 펼치고 접으며, 펼치면 예시를 왼쪽에 세로로 쌓아 보여 준다.
+class _SuggestionPanel extends StatelessWidget {
+  const _SuggestionPanel({
+    required this.suggestions,
+    required this.isOpen,
+    required this.onToggle,
+    required this.onSelected,
+  });
+
+  final List<String> suggestions;
+  final bool isOpen;
+  final VoidCallback onToggle;
+  final ValueChanged<String> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerLow,
+        border: Border(bottom: BorderSide(color: colorScheme.outlineVariant)),
+      ),
+      child: SingleChildScrollView(
+        child: AnimatedSize(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+          alignment: Alignment.topCenter,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              InkWell(
+                onTap: onToggle,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12 * kChatScale,
+                    vertical: 8 * kChatScale,
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.lightbulb_outline,
+                        size: 18 * kChatScale,
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 6 * kChatScale),
+                      Expanded(
+                        child: Text(
+                          '입력 예시',
+                          style: textTheme.labelLarge?.copyWith(
+                            color: colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                      Icon(
+                        isOpen ? Icons.expand_less : Icons.expand_more,
+                        semanticLabel: isOpen ? '입력 예시 접기' : '입력 예시 펼치기',
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              if (isOpen)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    12 * kChatScale,
+                    0,
+                    12 * kChatScale,
+                    4 * kChatScale,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (final text in suggestions)
+                        Padding(
+                          padding: const EdgeInsets.only(
+                            bottom: 6 * kChatScale,
+                          ),
+                          child: ActionChip(
+                            label: Text(text),
+                            onPressed: () => onSelected(text),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// TODO 3 — 테마 색상을 따르는 하단 메시지 입력창.
+class _MessageComposer extends StatelessWidget {
+  const _MessageComposer({
+    required this.controller,
+    required this.canSend,
+    required this.maxLines,
+    required this.onChanged,
+    required this.onSend,
+  });
+
+  final TextEditingController controller;
+  final bool canSend;
+  final int maxLines;
+  final ValueChanged<String> onChanged;
+  final VoidCallback onSend;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+      decoration: BoxDecoration(
+        color: colorScheme.surface,
+        border: Border(top: BorderSide(color: colorScheme.outlineVariant)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Expanded(
+            child: TextField(
+              controller: controller,
+              onChanged: onChanged,
+              onSubmitted: (_) => onSend(),
+              textInputAction: TextInputAction.send,
+              minLines: 1,
+              maxLines: maxLines,
+              decoration: InputDecoration(
+                hintText: '무엇이든 물어보세요',
+                isDense: true,
+                constraints: const BoxConstraints(minHeight: 48),
+                filled: true,
+                fillColor: colorScheme.surfaceContainerHighest,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 15,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(24),
+                  borderSide: BorderSide.none,
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(24),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 48,
+            height: 48,
+            child: IconButton.filled(
+              onPressed: canSend ? onSend : null,
+              tooltip: '메시지 전송',
+              icon: const Icon(Icons.send_rounded),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -125,40 +492,376 @@ class _Bubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      child: Text(message.text),
+    final colorScheme = Theme.of(context).colorScheme;
+    final isUser = message.isUser;
+
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(
+          horizontal: 12 * kChatScale,
+          vertical: 4 * kChatScale,
+        ),
+        padding: const EdgeInsets.symmetric(
+          horizontal: 12 * kChatScale,
+          vertical: 10 * kChatScale,
+        ),
+        // 화면이 이보다 좁으면 화면 폭에 맞춰 줄바꿈된다.
+        constraints: const BoxConstraints(maxWidth: 420 * kChatScale),
+        decoration: BoxDecoration(
+          color: isUser
+              ? colorScheme.primaryContainer
+              : colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(14 * kChatScale),
+        ),
+        child: Text(
+          message.text,
+          style: TextStyle(
+            color: isUser
+                ? colorScheme.onPrimaryContainer
+                : colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ),
     );
   }
 }
 
-/// TODO 3이 끝나면 지운다. 지금은 입력창 자리를 보여 주는 표시일 뿐이다.
-class _TodoBar extends StatelessWidget {
-  const _TodoBar({required this.label});
+/// 요청 상태에 맞는 AI 쪽 말풍선. 전송 중이면 타이핑 점, 실패면 오류 말풍선.
+class _StatusBubble extends StatelessWidget {
+  const _StatusBubble({required this.status, required this.onRetry});
 
+  final ChatStatus status;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    // 실습 ④ 할 일 4 — AnimatedSwitcher로 전환.
+    // key가 바뀔 때마다 이전 말풍선은 줄어들며 사라지고 새 말풍선이 나타난다.
+    return AnimatedSwitcher(
+      duration: kStatusSwitchDuration,
+      switchInCurve: Curves.easeOut,
+      switchOutCurve: Curves.easeIn,
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: SizeTransition(
+          sizeFactor: animation,
+          alignment: Alignment.bottomLeft, // 목록 아래쪽(최신 쪽)에 붙어서 자란다.
+          child: child,
+        ),
+      ),
+      layoutBuilder: (current, previous) => Stack(
+        alignment: Alignment.bottomLeft,
+        children: [...previous, ?current],
+      ),
+      child: switch (status) {
+        ChatIdle() => const SizedBox.shrink(key: ValueKey('idle')),
+        ChatSending() => const _TypingBubble(
+          key: ValueKey('sending'),
+          isUser: false,
+          label: 'AI가 응답을 작성하고 있습니다',
+        ),
+        ChatBackoff(:final delay, :final attempt) => _BackoffBubble(
+          key: ValueKey('backoff-$attempt'),
+          delay: delay,
+          attempt: attempt,
+        ),
+        ChatFailed(:final error) => _ErrorBubble(
+          key: ValueKey(error),
+          error: error,
+          onRetry: onRetry,
+        ),
+      },
+    );
+  }
+}
+
+/// 실습 ④ 할 일 2 — 오류 말풍선 + 다시 시도. AI 쪽(왼쪽)에 오류 색으로 띄운다.
+class _ErrorBubble extends StatelessWidget {
+  const _ErrorBubble({super.key, required this.error, required this.onRetry});
+
+  final ChatError error;
+  final VoidCallback onRetry;
+
+  IconData get _icon => switch (error.kind) {
+    ChatErrorKind.unauthorized => Icons.lock_outline,
+    ChatErrorKind.rateLimited => Icons.hourglass_empty,
+    ChatErrorKind.server => Icons.cloud_off_outlined,
+    ChatErrorKind.timeout => Icons.timer_off_outlined,
+    ChatErrorKind.unknown => Icons.error_outline,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final onColor = colorScheme.onErrorContainer;
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Semantics(
+        liveRegion: true,
+        child: Container(
+          margin: const EdgeInsets.symmetric(
+            horizontal: 12 * kChatScale,
+            vertical: 4 * kChatScale,
+          ),
+          padding: const EdgeInsets.fromLTRB(
+            12 * kChatScale,
+            10 * kChatScale,
+            12 * kChatScale,
+            10 * kChatScale,
+          ),
+          constraints: const BoxConstraints(maxWidth: 420 * kChatScale),
+          decoration: BoxDecoration(
+            color: colorScheme.errorContainer,
+            borderRadius: BorderRadius.circular(14 * kChatScale),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(_icon, color: onColor, size: 20 * kChatScale),
+              const SizedBox(width: 8 * kChatScale),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      error.title,
+                      style: textTheme.titleSmall?.copyWith(color: onColor),
+                    ),
+                    const SizedBox(height: 2 * kChatScale),
+                    Text(
+                      error.description,
+                      style: textTheme.bodyMedium?.copyWith(color: onColor),
+                    ),
+                    const SizedBox(height: 4 * kChatScale),
+                    TextButton.icon(
+                      onPressed: onRetry,
+                      style: TextButton.styleFrom(
+                        foregroundColor: onColor,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8 * kChatScale,
+                        ),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('다시 시도'),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 429 백오프 중에 보이는 안내 말풍선. 몇 초 뒤 몇 번째로 다시 보내는지 알려 준다.
+class _BackoffBubble extends StatelessWidget {
+  const _BackoffBubble({super.key, required this.delay, required this.attempt});
+
+  final Duration delay;
+  final int attempt;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final onColor = colorScheme.onTertiaryContainer;
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Semantics(
+        liveRegion: true,
+        child: Container(
+          margin: const EdgeInsets.symmetric(
+            horizontal: 12 * kChatScale,
+            vertical: 4 * kChatScale,
+          ),
+          padding: const EdgeInsets.symmetric(
+            horizontal: 12 * kChatScale,
+            vertical: 10 * kChatScale,
+          ),
+          constraints: const BoxConstraints(maxWidth: 420 * kChatScale),
+          decoration: BoxDecoration(
+            color: colorScheme.tertiaryContainer,
+            borderRadius: BorderRadius.circular(14 * kChatScale),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.hourglass_top, color: onColor, size: 20 * kChatScale),
+              const SizedBox(width: 8 * kChatScale),
+              Flexible(
+                child: Text(
+                  '요청이 많아 ${delay.inSeconds}초 뒤 다시 보내요 '
+                  '($attempt/${kRateLimitBackoff.length})',
+                  style: TextStyle(color: onColor),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 앱바의 오류 재현 메뉴. 가짜 API가 다음 요청에 돌려줄 상황을 고른다.
+class _FakeModeMenu extends StatefulWidget {
+  const _FakeModeMenu({required this.api});
+
+  final FakeChatApi api;
+
+  @override
+  State<_FakeModeMenu> createState() => _FakeModeMenuState();
+}
+
+class _FakeModeMenuState extends State<_FakeModeMenu> {
+  @override
+  Widget build(BuildContext context) {
+    final mode = widget.api.mode;
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // 정상 응답이 아닐 때는 지금 어떤 오류를 재현 중인지 앱바에 표시한다.
+        if (mode != FakeMode.success)
+          Text(
+            mode.label,
+            style: TextStyle(color: colorScheme.error, fontSize: 13),
+          ),
+        PopupMenuButton<FakeMode>(
+          tooltip: '오류 재현',
+          icon: const Icon(Icons.science_outlined),
+          initialValue: mode,
+          onSelected: (value) => setState(() => widget.api.mode = value),
+          itemBuilder: (context) => [
+            for (final value in FakeMode.values)
+              CheckedPopupMenuItem(
+                value: value,
+                checked: value == mode,
+                child: Text(value.label),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// 메시지를 작성하거나 AI가 응답을 생성할 때 보이는 점 애니메이션 말풍선.
+class _TypingBubble extends StatelessWidget {
+  const _TypingBubble({super.key, required this.isUser, required this.label});
+
+  final bool isUser;
   final String label;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 4, 12, 12),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(8),
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(
+          horizontal: 12 * kChatScale,
+          vertical: 4 * kChatScale,
+        ),
+        padding: const EdgeInsets.symmetric(
+          horizontal: 12 * kChatScale,
+          vertical: 10 * kChatScale,
+        ),
+        decoration: BoxDecoration(
+          color: isUser
+              ? colorScheme.primaryContainer
+              : colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(14 * kChatScale),
+        ),
+        child: _TypingDots(
+          label: label,
+          color: isUser
+              ? colorScheme.onPrimaryContainer
+              : colorScheme.onSurfaceVariant,
+        ),
       ),
-      child: Row(
-        children: [
-          const Icon(Icons.edit_outlined, size: 18),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              label,
-              style: const TextStyle(fontSize: 13),
+    );
+  }
+}
+
+class _TypingDots extends StatefulWidget {
+  const _TypingDots({required this.label, required this.color});
+
+  final String label;
+  final Color color;
+
+  @override
+  State<_TypingDots> createState() => _TypingDotsState();
+}
+
+class _TypingDotsState extends State<_TypingDots>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1050),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: widget.label,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, child) {
+          return SizedBox(
+            width: 42 * kChatScale,
+            height: 18 * kChatScale,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(3, (index) {
+                final phase = (_controller.value + index / 3) % 1;
+                final progress = phase < 0.5
+                    ? Curves.easeOut.transform(phase * 2)
+                    : Curves.easeIn.transform((1 - phase) * 2);
+
+                return Transform.translate(
+                  offset: Offset(0, -3 * kChatScale * progress),
+                  child: Opacity(
+                    opacity: 0.3 + (0.7 * progress),
+                    child: Container(
+                      width: 5 * kChatScale,
+                      height: 5 * kChatScale,
+                      margin: const EdgeInsets.symmetric(
+                        horizontal: 2 * kChatScale,
+                      ),
+                      decoration: BoxDecoration(
+                        color: widget.color,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
+                );
+              }),
             ),
-          ),
-        ],
+          );
+        },
       ),
     );
   }
