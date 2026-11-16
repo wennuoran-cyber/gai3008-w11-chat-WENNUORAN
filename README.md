@@ -14,7 +14,32 @@ flutter run -d chrome      # 또는 -d <에뮬레이터>
 
 ## 화면
 
-<!-- 스크린샷·GIF 자리. 넣을 내용은 docs/SCREENSHOT_GUIDE.md 참고 -->
+| 기능 | 스크린샷 | 설명 |
+|---|---|---|
+| 기본 채팅 화면 | <img src="docs/screenshots/01-chat.png" width="240" alt="이전 대화가 보이는 기본 채팅 화면"> | 사용자 말풍선은 오른쪽, AI 말풍선은 왼쪽. 최신 메시지가 아래에 쌓이고, 빈 입력창에는 "무엇이든 물어보세요" 힌트가 보인다 (실습 1 — 2·3·4) |
+| 입력 예시 | <img src="docs/screenshots/02-suggestions.png" width="240" alt="입력 예시 패널을 펼친 화면"> | 💡 입력 예시 줄을 누르면 예시 4개가 펼쳐진다. 예시를 누르면 입력창에 채워지고 패널은 다시 접힌다 (실습 1 — 4) |
+| 오류 말풍선 | <img src="docs/screenshots/03-error.png" width="240" alt="500 서버 오류 말풍선과 다시 시도 버튼"> | 500 오류가 나면 AI 쪽에 붉은 오류 말풍선과 **다시 시도** 버튼이 뜨고, 다음 전송 전까지 화면에 남는다. 앱바에는 재현 중인 오류 이름이 보인다 (실습 ④ — 1·2) |
+| 오류 → 다시 시도 | <img src="docs/screenshots/04-retry.gif" width="240" alt="오류 말풍선에서 다시 시도를 눌러 응답을 받는 과정"> | 다시 시도를 누르면 사용자 말풍선을 늘리지 않고 마지막 문장을 다시 보낸다. 오류 → 타이핑 점 → 응답이 `AnimatedSwitcher`로 부드럽게 바뀌고, 오류 뒤에도 입력이 된다 (실습 ④ — 2·3·4) |
+| 429 지수 백오프 | <img src="docs/screenshots/05-backoff.gif" width="240" alt="429 뒤 1초 기다렸다가 자동으로 다시 보내 응답을 받는 과정"> | 429를 받으면 오류를 바로 띄우지 않고 "1초 뒤 다시 보내요 (1/2)"를 보여 준 뒤 자동으로 다시 보내 응답을 받는다 (실습 ④ — 5) |
+
+### 애니메이션 — 상호작용 예시
+
+| 상황 | 화면 | 설명 |
+|---|---|---|
+| 내가 입력할 때 | <img src="docs/screenshots/06-user-typing.gif" width="240" alt="입력하는 동안 오른쪽에 점 세 개 말풍선이 나타나고 입력을 지우면 사라지는 모습"> | 입력창에 글자가 있으면 **오른쪽(사용자 쪽)** 맨 아래에 점 세 개 말풍선이 나타나고, 입력을 모두 지우면 사라진다. 전송 버튼도 이때만 켜진다 |
+| AI가 답장할 때 | <img src="docs/screenshots/07-ai-reply.gif" width="240" alt="전송 후 왼쪽에 점 세 개 말풍선이 보이다가 AI 응답으로 바뀌는 모습"> | 전송하면 내 말풍선이 오른쪽에 붙고, **왼쪽(AI 쪽)** 에 점 세 개 말풍선이 1.2초 동안 보인 뒤 응답 말풍선으로 바뀐다. 기다리는 동안 전송은 막힌다 |
+
+**어떻게 움직이나**
+
+| 애니메이션 | 구현 | 동작 |
+|---|---|---|
+| 타이핑 점 | `_TypingDots` — `AnimationController`(1050ms, `repeat()`) + `AnimatedBuilder` | 점 3개가 1/3 주기씩 어긋나 차례로 위로 튀어 오르고(`easeOut` / `easeIn`), 올라갈수록 진해진다(투명도 0.3 → 1.0). 색은 사용자 쪽이면 `onPrimaryContainer`, AI 쪽이면 `onSurfaceVariant` |
+| 상태 전환 | `_StatusBubble` — `AnimatedSwitcher`(250ms) + `FadeTransition` + `SizeTransition` | 목록 맨 아래 상태 자리가 비어 있음 ↔ AI 타이핑 점 ↔ 429 대기 안내 ↔ 오류 말풍선으로 바뀔 때, 이전 것은 줄어들며 흐려지고 새 것은 아래쪽에서 자라며 나타난다 |
+| 입력 예시 패널 | `AnimatedSize`(200ms, `easeOut`) | 💡 입력 예시를 펼치고 접을 때 패널 높이가 부드럽게 늘고 준다 |
+
+- 사용자 타이핑 점은 `_isUserTyping`(입력창이 비어 있지 않음)일 때만 목록 index 0에 끼워 넣는다. `reverse: true`라서 index 0이 화면 맨 아래다.
+- AI 타이핑 점은 `ChatSending` 상태일 때 `AnimatedSwitcher`의 자식으로 들어간다. 그래서 응답이 오면 점이 사라지는 것과 동시에 응답 말풍선이 목록에 추가된다.
+- `AnimationController`는 `dispose()`에서 정리한다. 점 말풍선에는 스크린 리더용 `Semantics` 라벨("메시지를 입력하고 있습니다" / "AI가 응답을 작성하고 있습니다")이 붙어 있다.
 
 ## 할 일
 
@@ -110,6 +135,7 @@ test/widget_test.dart       ← 앱 실행·전송·키보드·입력 예시 동
 test/error_retry_test.dart  ← 실습 ④ 할 일 1~5와 완료 기준 테스트
 test/layout_test.dart       ← 화면 크기·키보드·글자 크기 조합에서 레이아웃이 넘치지 않는지 확인
 docs/SCREENSHOT_GUIDE.md    ← README에 넣을 스크린샷·GIF 촬영 지침
+docs/screenshots/           ← README 화면 섹션의 스크린샷 3장 · GIF 4개
 ```
 
 ## 테스트
