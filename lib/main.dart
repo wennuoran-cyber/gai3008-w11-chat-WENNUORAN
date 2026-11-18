@@ -27,6 +27,20 @@ class ChatMessage {
   final bool isUser;
 }
 
+/// 실습 4 — 오류 상태. status가 null이면 timeout/네트워크 오류.
+class ApiError implements Exception {
+  const ApiError(this.status);
+
+  final int? status;
+}
+
+String errorMessage(ApiError e) => switch (e.status) {
+      401 => '키/권한을 확인해 주세요',
+      429 => '잠시 후 다시 시도해 주세요',
+      500 => '응답을 받지 못했습니다',
+      _ => '네트워크를 확인해 주세요',
+    };
+
 class ChatPage extends StatefulWidget {
   const ChatPage({super.key});
 
@@ -44,12 +58,9 @@ class _ChatPageState extends State<ChatPage> {
 
   final _controller = TextEditingController();
 
-  void _send() {
-    final text = _controller.text.trim();
-    if (text.isEmpty) return;
-    setState(() => _messages.add(ChatMessage(text: text, isUser: true)));
-    _controller.clear();
-  }
+  bool _isLoading = false;
+  String? _error; // 화면에 남는 오류 문구
+  ApiError? _demoFail; // 데모용: 이 요청을 실패시킬 오류
 
   @override
   void dispose() {
@@ -57,17 +68,94 @@ class _ChatPageState extends State<ChatPage> {
     super.dispose();
   }
 
+  /// 데모: 문장에 401/429/500/timeout이 들어 있으면 그 오류로 실패시킨다.
+  ApiError? _demoErrorFor(String text) {
+    final t = text.toLowerCase();
+    if (t.contains('401')) return const ApiError(401);
+    if (t.contains('429')) return const ApiError(429);
+    if (t.contains('500')) return const ApiError(500);
+    if (t.contains('timeout')) return const ApiError(null);
+    return null;
+  }
+
+  Future<void> _send() async {
+    final text = _controller.text.trim();
+    if (text.isEmpty || _isLoading) return;
+    setState(() {
+      _messages.add(ChatMessage(text: text, isUser: true));
+      _error = null; // 오류가 남아 있어도 새 입력은 그대로 보낼 수 있다
+    });
+    _controller.clear();
+    _demoFail = _demoErrorFor(text);
+    await _requestReply(text);
+  }
+
+  Future<void> _requestReply(String prompt) async {
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+    try {
+      final reply = await _fakeApi(prompt);
+      if (!mounted) return;
+      setState(() => _messages.add(ChatMessage(text: reply, isUser: false)));
+    } on ApiError catch (e) {
+      if (!mounted) return;
+      setState(() => _error = errorMessage(e));
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<String> _fakeApi(String prompt) async {
+    await Future.delayed(const Duration(milliseconds: 800));
+    final fail = _demoFail;
+    if (fail != null) throw fail;
+    return '"$prompt"에 대한 가짜 응답입니다.';
+  }
+
+  /// 목록 맨 아래 칸: 로딩 / 오류 / 비어 있음
+  Widget _statusSlot() {
+    if (_isLoading) {
+      return const Padding(
+        padding: EdgeInsets.all(14),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
+    }
+    if (_error != null) {
+      return Padding(
+        padding: const EdgeInsets.all(14),
+        child: Text(
+          _error!,
+          style: TextStyle(color: Theme.of(context).colorScheme.error),
+        ),
+      );
+    }
+    return const SizedBox.shrink();
+  }
+
   @override
   Widget build(BuildContext context) {
+    final showEmpty = _messages.isEmpty && !_isLoading && _error == null;
     return Scaffold(
-      resizeToAvoidBottomInset: true, // 키보드가 올라오면 body가 줄어든다
+      resizeToAvoidBottomInset: true,
       appBar: AppBar(
         title: const Text('AI Chat — 실습 1'),
         actions: [
           IconButton(
             tooltip: '대화 지우기',
             icon: const Icon(Icons.delete_outline),
-            onPressed: () => setState(_messages.clear),
+            onPressed: () => setState(() {
+              _messages.clear();
+              _error = null;
+            }),
           ),
         ],
       ),
@@ -82,13 +170,14 @@ class _ChatPageState extends State<ChatPage> {
                     keyboardDismissBehavior:
                         ScrollViewKeyboardDismissBehavior.onDrag,
                     padding: const EdgeInsets.symmetric(vertical: 8),
-                    itemCount: _messages.length,
+                    itemCount: _messages.length + 1,
                     itemBuilder: (context, index) {
-                      final message = _messages[_messages.length - 1 - index];
+                      if (index == 0) return _statusSlot();
+                      final message = _messages[_messages.length - index];
                       return _Bubble(message: message);
                     },
                   ),
-                  if (_messages.isEmpty)
+                  if (showEmpty)
                     Center(
                       child: Text(
                         '무엇이든 물어보세요',
@@ -108,7 +197,7 @@ class _ChatPageState extends State<ChatPage> {
                       textInputAction: TextInputAction.send,
                       onSubmitted: (_) => _send(),
                       decoration: InputDecoration(
-                        hintText: '메시지를 입력하세요',
+                        hintText: '메시지 입력 (401·429·500·timeout 테스트)',
                         filled: true,
                         contentPadding: const EdgeInsets.symmetric(
                             horizontal: 16, vertical: 12),
@@ -121,7 +210,7 @@ class _ChatPageState extends State<ChatPage> {
                   ),
                   const SizedBox(width: 8),
                   IconButton.filled(
-                    onPressed: _send,
+                    onPressed: _isLoading ? null : _send,
                     icon: const Icon(Icons.send),
                   ),
                 ],
