@@ -60,6 +60,7 @@ class _ChatPageState extends State<ChatPage> {
 
   bool _isLoading = false;
   String? _error; // 화면에 남는 오류 문구
+  String? _note; // 백오프 대기 안내 문구
   ApiError? _demoFail; // 데모용: 이 요청을 실패시킬 오류
 
   @override
@@ -94,16 +95,39 @@ class _ChatPageState extends State<ChatPage> {
     setState(() {
       _isLoading = true;
       _error = null;
+      _note = null;
     });
     try {
-      final reply = await _fakeApi(prompt);
+      final reply = await _callWithBackoff(prompt);
       if (!mounted) return;
       setState(() => _messages.add(ChatMessage(text: reply, isUser: false)));
     } on ApiError catch (e) {
       if (!mounted) return;
       setState(() => _error = errorMessage(e));
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _note = null;
+        });
+      }
+    }
+  }
+
+  /// 429면 지수 백오프: 1s → 2s 기다리며 최대 2번 자동 재시도.
+  Future<String> _callWithBackoff(String prompt) async {
+    var delay = const Duration(seconds: 1);
+    for (var attempt = 0;; attempt++) {
+      try {
+        return await _fakeApi(prompt);
+      } on ApiError catch (e) {
+        if (e.status != 429 || attempt >= 2) rethrow;
+        if (mounted) {
+          setState(() => _note = '요청이 많아요. ${delay.inSeconds}초 후 다시 시도…');
+        }
+        await Future.delayed(delay);
+        delay *= 2;
+      }
     }
   }
 
@@ -127,7 +151,7 @@ class _ChatPageState extends State<ChatPage> {
   Widget _statusSlot() {
     final Widget child;
     if (_isLoading) {
-      child = const _TypingBubble(key: ValueKey('loading'));
+      child = _TypingBubble(key: const ValueKey('loading'), note: _note);
     } else if (_error != null) {
       child = _ErrorBubble(
         key: ValueKey('error-$_error'),
