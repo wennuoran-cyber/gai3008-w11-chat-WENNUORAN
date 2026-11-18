@@ -60,6 +60,7 @@ class _ChatPageState extends State<ChatPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      resizeToAvoidBottomInset: true, // 키보드가 올라오면 body가 줄어든다
       appBar: AppBar(
         title: const Text('AI Chat — 실습 1'),
         actions: [
@@ -78,6 +79,8 @@ class _ChatPageState extends State<ChatPage> {
                 children: [
                   ListView.builder(
                     reverse: true,
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
                     padding: const EdgeInsets.symmetric(vertical: 8),
                     itemCount: _messages.length,
                     itemBuilder: (context, index) {
