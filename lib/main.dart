@@ -114,6 +114,15 @@ class _ChatPageState extends State<ChatPage> {
     return '"$prompt"에 대한 가짜 응답입니다.';
   }
 
+  /// 재시도 = 마지막 사용자 메시지를 다시 보낸다.
+  void _retry() {
+    if (_isLoading) return;
+    final i = _messages.lastIndexWhere((m) => m.isUser);
+    if (i < 0) return;
+    _demoFail = null; // 데모: 다시 시도하면 성공
+    _requestReply(_messages[i].text);
+  }
+
   /// 목록 맨 아래 칸: 로딩 / 오류 / 비어 있음
   Widget _statusSlot() {
     if (_isLoading) {
@@ -130,13 +139,7 @@ class _ChatPageState extends State<ChatPage> {
       );
     }
     if (_error != null) {
-      return Padding(
-        padding: const EdgeInsets.all(14),
-        child: Text(
-          _error!,
-          style: TextStyle(color: Theme.of(context).colorScheme.error),
-        ),
-      );
+      return _ErrorBubble(message: _error!, onRetry: _retry);
     }
     return const SizedBox.shrink();
   }
@@ -245,6 +248,52 @@ class _Bubble extends StatelessWidget {
         child: Text(
           message.text,
           style: TextStyle(color: isUser ? cs.onPrimaryContainer : cs.onSurface),
+        ),
+      ),
+    );
+  }
+}
+
+class _ErrorBubble extends StatelessWidget {
+  const _ErrorBubble({super.key, required this.message, required this.onRetry});
+
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+        constraints: const BoxConstraints(maxWidth: 420),
+        decoration: BoxDecoration(
+          color: cs.errorContainer,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.error_outline, size: 18, color: cs.onErrorContainer),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(message,
+                      style: TextStyle(color: cs.onErrorContainer)),
+                ),
+              ],
+            ),
+            TextButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('다시 시도'),
+            ),
+          ],
         ),
       ),
     );
