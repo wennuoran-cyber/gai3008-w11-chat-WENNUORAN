@@ -123,25 +123,28 @@ class _ChatPageState extends State<ChatPage> {
     _requestReply(_messages[i].text);
   }
 
-  /// 목록 맨 아래 칸: 로딩 / 오류 / 비어 있음
+  /// 목록 맨 아래 칸: 로딩 ↔ 오류 ↔ 없음을 AnimatedSwitcher로 전환.
   Widget _statusSlot() {
+    final Widget child;
     if (_isLoading) {
-      return const Padding(
-        padding: EdgeInsets.all(14),
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: SizedBox(
-            width: 16,
-            height: 16,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-        ),
+      child = const _TypingBubble(key: ValueKey('loading'));
+    } else if (_error != null) {
+      child = _ErrorBubble(
+        key: ValueKey('error-$_error'),
+        message: _error!,
+        onRetry: _retry,
       );
+    } else {
+      child = const SizedBox.shrink(key: ValueKey('none'));
     }
-    if (_error != null) {
-      return _ErrorBubble(message: _error!, onRetry: _retry);
-    }
-    return const SizedBox.shrink();
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 300),
+      transitionBuilder: (c, anim) => FadeTransition(
+        opacity: anim,
+        child: SizeTransition(sizeFactor: anim, child: c),
+      ),
+      child: child,
+    );
   }
 
   @override
@@ -248,6 +251,42 @@ class _Bubble extends StatelessWidget {
         child: Text(
           message.text,
           style: TextStyle(color: isUser ? cs.onPrimaryContainer : cs.onSurface),
+        ),
+      ),
+    );
+  }
+}
+
+class _TypingBubble extends StatelessWidget {
+  const _TypingBubble({super.key, this.note});
+
+  final String? note;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: cs.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            if (note != null) ...[
+              const SizedBox(width: 10),
+              Flexible(child: Text(note!, style: const TextStyle(fontSize: 13))),
+            ],
+          ],
         ),
       ),
     );
