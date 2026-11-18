@@ -60,19 +60,39 @@ class _ChatPageState extends State<ChatPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('AI Chat — 실습 1')),
+      appBar: AppBar(
+        title: const Text('AI Chat — 실습 1'),
+        actions: [
+          IconButton(
+            tooltip: '대화 지우기',
+            icon: const Icon(Icons.delete_outline),
+            onPressed: () => setState(_messages.clear),
+          ),
+        ],
+      ),
       body: SafeArea(
         child: Column(
           children: [
             Expanded(
-              child: ListView.builder(
-                reverse: true,
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                itemCount: _messages.length,
-                itemBuilder: (context, index) {
-                  final message = _messages[_messages.length - 1 - index];
-                  return _Bubble(message: message);
-                },
+              child: Stack(
+                children: [
+                  ListView.builder(
+                    reverse: true,
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    itemCount: _messages.length,
+                    itemBuilder: (context, index) {
+                      final message = _messages[_messages.length - 1 - index];
+                      return _Bubble(message: message);
+                    },
+                  ),
+                  if (_messages.isEmpty)
+                    Center(
+                      child: Text(
+                        '무엇이든 물어보세요',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                ],
               ),
             ),
             Padding(
